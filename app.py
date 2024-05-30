@@ -8,6 +8,7 @@ import face_recognition
 from PIL import Image
 from io import BytesIO
 import numpy as np
+import json
 
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'oracle+cx_oracle://FACE_OWNER:ftp2023@192.168.1.251:1521/?service_name=orcl'
@@ -25,12 +26,25 @@ class Face(db.Model):
   def __repr__(self):
     return f'<Face {self.id}>'
   
-def base64_to_mat(base64_string):
-  image_data = base64.b64decode(base64_string)
+def get_face_from_img (file):
+  image_data = file.read()
+  if not image_data:
+    raise ValueError("Image reading failed.") 
+
+  # Sử dụng BytesIO để tạo một đối tượng IO từ dữ liệu ảnh
   image = Image.open(BytesIO(image_data))
+  image = image.convert('RGB')
+
   image_np = np.array(image)
-  return image_np
-  
+  face_arr = face_recognition.face_encodings(image_np)[0]
+  return face_arr
+
+def get_face_json (file):
+  face_arr = get_face_from_img(file) 
+  face_list = face_arr.tolist()
+  face_json = json.dumps(face_list)
+  return face_json
+
 @app.route('/face', methods=['POST'])
 def addFace():
   file = request.files.get('file')
@@ -39,15 +53,8 @@ def addFace():
   
   if file:
     try:
-      file_content = file.read()
-      base64_file = base64.b64encode(file_content).decode('utf-8')
-
-      image = base64_to_mat(base64_file)
-      face_id = face_recognition.face_encodings(image)[0]
-      face_id = str(face_id)
-
       new_record = Face(
-        matrix=face_id,
+        matrix=get_face_json(file),
         type='0',
         tbl_id=123,
         des=file.filename,
@@ -59,8 +66,12 @@ def addFace():
     except Exception as e:
       return f"An error occurred: {str(e)}", 500
 
-@app.route('/face_match', methods=['POST'])
-def addFace():
+@app.route('/check-face', methods=['POST'])
+def checkFace():
+  """
+  Truyền vào type và một ảnh (file)
+  Kiểm tra xem ảnh đó có khớp với dữ liệu trong DB không
+  """
   file = request.files.get('file')
   file_type = request.form.get('type')
  
@@ -68,5 +79,19 @@ def addFace():
     return jsonify({"error": "No file part"}), 400
   if not file_type:
     return jsonify({"error": "No 'type' field"}), 400
+  
+  faces_by_type = Face.query.filter_by(type=file_type).all()
+  known_face_encodings = []
 
-  return jsonify({"message": "Request success"}), 200
+  try:
+    for face in faces_by_type:
+      face_list = json.loads(face.matrix)
+      face_arr = np.array(face_list)
+      known_face_encodings.append(face_arr)
+
+    match = face_recognition.compare_faces(known_face_encodings, get_face_from_img(file))
+    message = "Ảnh khớp" if match[0] else "Ảnh không khớp"
+    return jsonify({"message": message}), 200
+  
+  except Exception as e:
+    return jsonify({'error': str(e)})
